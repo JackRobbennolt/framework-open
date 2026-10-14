@@ -17,7 +17,7 @@ class Network;
 
 class Neuron {
 public:
-  Neuron(uint32_t node_id, double t, bool l);
+  Neuron(uint32_t node_id, double t, int ln);
   vector <Synapse*> synapses;  /**< Outgoing synapses */
   vector <double> fire_times;  /**< Firing times */ 
   double charge;               /**< Charge value */
@@ -25,7 +25,8 @@ public:
   int last_check;              /**< Last time we process this node */
   int last_fire;               /**< Last firing time */
   uint32_t fire_counts;        /**< Number of fires */
-  bool leak;                   /**< Leak on this neuron or not */
+  int leak_num;
+  int last_update;
   uint32_t id;                 /**< ID for logging events */
   bool check;                  /**< True if we have checked if this neruon fires or not */
   bool track;                  /**< True if fire_times is being tracked */
@@ -49,6 +50,7 @@ public:
           double _spike_value_factor, 
           double _min_potential,
           char leak,
+          int _leak_gran,
           bool _run_time_inclusive,
           bool _threshold_inclusive,
           bool _fire_like_ravens,
@@ -59,6 +61,8 @@ public:
           vector <double> & _weights, 
           vector <double> & _stds);  
   ~Network();
+
+  int leak_gran;
 
   /* Similar calls from Processor API */
   void apply_spike(const Spike& s, bool normalized = true);
@@ -89,7 +93,10 @@ public:
 
 
 protected:
-  Neuron* add_neuron(uint32_t node_id, double threshold, bool leak);
+  Neuron* add_neuron(uint32_t node_id, double threshold, int leak_num);
+
+  void apply_leak(Neuron* n, int now);
+
   Synapse* add_synpase(uint32_t from_id, uint32_t to_id, double weight, uint32_t delay);
 
   void add_input(uint32_t node_id, int input_id);
@@ -223,6 +230,7 @@ protected:
   bool discrete;
   double spike_value_factor;
   string leak_mode;
+  int leak_gran;
   bool run_time_inclusive;
   bool threshold_inclusive;
   bool fire_like_ravens;

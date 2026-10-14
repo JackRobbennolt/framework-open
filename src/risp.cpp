@@ -19,6 +19,7 @@ static json risp_spec = {
   { "noisy_stddev", "D" },
   { "spike_value_factor", "D" },
   { "leak_mode", "S" },            /* "all", "none", "configurable" */
+  { "leak_gran", "I" },
   { "fire_like_ravens", "B" },
   { "run_time_inclusive", "B" },
   { "threshold_inclusive", "B" },
@@ -35,13 +36,14 @@ static json risp_spec = {
                      "discrete" } } };
 
 /** initialization for Neuron, Synapse  */
-Neuron::Neuron(uint32_t node_id, double t, bool l) 
+Neuron::Neuron(uint32_t node_id, double t, int ln) 
   : charge(0),
     threshold(t),
     last_check(-1),
     last_fire(-1),
     fire_counts(0),
-    leak(l),
+    leak_num(ln),
+    last_update(0),
     id(node_id),
     check(false) {};
 
@@ -59,6 +61,7 @@ Network::Network(neuro::Network *net,
                  double _spike_value_factor, 
                  double _min_potential, 
                  char leak,
+                 int _leak_gran,
                  bool _run_time_inclusive,
                  bool _threshold_inclusive,
                  bool _fire_like_ravens,
@@ -75,7 +78,8 @@ Network::Network(neuro::Network *net,
   EdgeMap::iterator eit;
   Neuron *n;
   leak_mode = leak;
-  bool neuron_leak;
+  int leak_num;
+  leak_gran = _leak_gran;
 
   spike_value_factor = _spike_value_factor;
   min_potential = _min_potential;
@@ -100,12 +104,14 @@ Network::Network(neuro::Network *net,
     node = net->sorted_node_vector[i];
 
     if (leak_mode == 'c') {
-      neuron_leak = (node->get("Leak") != 0);
-    } else {
-      neuron_leak = (leak_mode == 'a');
+      leak_num = (node->get("Leak_Num"));
+    } else if (leak_mode == 'a'){
+      leak_num = 0;
+    } else{
+      leak_num = leak_gran;
     }
 
-    n = add_neuron(node->id, node->get("Threshold"), neuron_leak);
+    n = add_neuron(node->id, node->get("Threshold"), leak_num);
     if (node->is_input()) add_input(node->id, node->input_id);
     if (node->is_output()) add_output(node->id, node->output_id);
 
@@ -145,7 +151,7 @@ bool Network::is_valid_output_id(int output_id) {
   return !(output_id < 0 || output_id >= (int) outputs.size() || outputs[output_id] == -1);
 }
 
-Neuron* Network::add_neuron(uint32_t node_id, double threshold, bool leak) {
+Neuron* Network::add_neuron(uint32_t node_id, double threshold, int leak_num) {
   Neuron *n;
   char buf[200];
 
@@ -153,7 +159,7 @@ Neuron* Network::add_neuron(uint32_t node_id, double threshold, bool leak) {
     snprintf(buf, 200, "risp::Neuron::add_neuron() - %u is already in the neuron map\n", node_id);
     throw SRE((string) buf);
   }
-  n = new Neuron(node_id, threshold, leak);
+  n = new Neuron(node_id, threshold, leak_num);
 
   /* JSP: I'm not a big fan of this hack, 
      but I'd rather do this than put an if
@@ -166,6 +172,16 @@ Neuron* Network::add_neuron(uint32_t node_id, double threshold, bool leak) {
   neuron_map[node_id] = n;
   return n;
 }
+void Network::apply_leak(Neuron* n, int now){
+  int delta = now - n->last_update;
+  for(int i = 0; i < delta; i++){
+    n->charge = (n->leak_num * n->charge)/leak_gran;
+    if (n->charge == 0) break;
+  }
+  if (discrete) n->charge = trunc(n->charge);
+  n->last_update = now;
+}
+ 
 
 Network::~Network() {
   size_t i;
@@ -265,7 +281,7 @@ void Network::process_events(uint32_t time)
 
   for (i = 0; i < es.size(); i++) {
     n = es[i].first;
-    if (n->leak) n->charge = 0;
+    this->apply_leak(n, time);
     if (n->charge < min_potential) n->charge = min_potential;
   }
 
@@ -334,6 +350,7 @@ void Network::clear_activity() {
   for (i = 0; i < sorted_neuron_vector.size(); i++) {
     n = sorted_neuron_vector[i];
     n->last_fire = -1;
+    n->last_update = 0;
     n->fire_counts = 0;
     n->fire_times.clear();  // JSP should clear regardless of tracking.
     n->charge = 0;
@@ -446,7 +463,8 @@ void Network::run(double duration) {
 
   for (i = 0; i < sorted_neuron_vector.size(); i++) {
     n = sorted_neuron_vector[i];
-    if (n->leak) n->charge = 0;
+    apply_leak(n,run_time + 1);
+    n->last_update = 0;
     if (n->charge < min_potential) n->charge = min_potential;
   }
 }
@@ -632,6 +650,7 @@ Processor::Processor(json &params)
 {
   string estring;
   size_t i;
+  leak_gran = 127;
 
   if (params.contains("input_scaling_value")) {
     estring =  "RISP: input_scaling_value is no longer supported.\n";
@@ -751,7 +770,7 @@ Processor::Processor(json &params)
       fprintf(stderr, "Spike_value_factor set to %lg.\n", spike_value_factor);
     }
   } 
-  
+  if (params.contains("leak_gran")) leak_gran = params["leak_gran"];
   if (params.contains("run_time_inclusive")) run_time_inclusive = params["run_time_inclusive"];
   if (params.contains("fire_like_ravens")) fire_like_ravens = params["fire_like_ravens"];
   if (params.contains("noisy_seed")) noisy_seed = params["noisy_seed"];
@@ -767,6 +786,7 @@ Processor::Processor(json &params)
   /* General Error Checking */
 
   if (discrete) {
+    if (leak_gran < 1) throw SRE("leak granularity < 1");
     if (!is_integer(min_weight)) throw SRE("When discrete = true, min_weight must be an integer.");
     if (!is_integer(max_weight)) throw SRE("When discrete = true, max_weight must be an integer.");
     if (!is_integer(min_potential)) {
@@ -812,6 +832,7 @@ Processor::Processor(json &params)
     if (!inputs_from_weights) saved_params["spike_value_factor"] = spike_value_factor;
   }
 
+  saved_params["leak_gran"] = leak_gran;
   saved_params["max_delay"] = max_delay;
   saved_params["min_threshold"] = min_threshold;
   saved_params["max_threshold"] = max_threshold;
@@ -848,8 +869,8 @@ bool Processor::load_network(neuro::Network* net, int network_id) {
   if (!net->is_node_property("Threshold")) error = rln + "Missing node' Threshold property\n";
   if (!net->is_edge_property("Weight")) error += (rln + "Missing edge Weight property\n");
   if (!net->is_edge_property("Delay")) error += (rln + "Missing edge Delay property\n");
-  if (leak_mode[0] == 'c' && !net->is_node_property("Leak")) {
-    error += (rln + "Missing node' Leak property\n");
+  if (leak_mode[0] == 'c' && !net->is_node_property("Leak_Num")) {
+    error += (rln + "Missing node' Leak_Num property\n");
   }
 
   if (net->get_properties().as_json() != get_network_properties().as_json()) {
@@ -867,7 +888,8 @@ bool Processor::load_network(neuro::Network* net, int network_id) {
   risp_net = new risp::Network(net, 
                                spike_value_factor,
                                min_potential,
-                               leak_mode[0], 
+                               leak_mode[0],
+                               leak_gran, 
                                run_time_inclusive, 
                                threshold_inclusive, 
                                fire_like_ravens, 
@@ -1032,7 +1054,7 @@ PropertyPack Processor::get_network_properties() const
   pp.add_node_property("Threshold", min_threshold, max_threshold, 
                        (discrete) ? Property::Type::INTEGER : Property::Type::DOUBLE);
 
-  if (leak_mode[0] == 'c') pp.add_node_property("Leak", 0, 1, Property::Type::BOOLEAN);
+  if (leak_mode[0] == 'c') pp.add_node_property("Leak_Num", 0, leak_gran, Property::Type::INTEGER);
 
   if (weights.size() > 0) {
     pp.add_edge_property("Weight", 0, weights.size()-1, Property::Type::INTEGER);
